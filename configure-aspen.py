@@ -62,6 +62,7 @@ website.renderer_factories['jinja2'].Renderer.global_context = {
 
 
 env = website.env = gratipay.wireup.env()
+tell_sentry = website.tell_sentry = gratipay.wireup.make_sentry_teller(env)
 gratipay.wireup.canonical(env)
 website.db = gratipay.wireup.db(env)
 website.mail = gratipay.wireup.mail(env)
@@ -70,7 +71,6 @@ gratipay.wireup.username_restrictions(website)
 gratipay.wireup.nanswers(env)
 gratipay.wireup.other_stuff(website, env)
 gratipay.wireup.accounts_elsewhere(website, env)
-tell_sentry = website.tell_sentry = gratipay.wireup.make_sentry_teller(env)
 
 if exc:
     tell_sentry(exc)
