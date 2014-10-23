@@ -1,123 +1,73 @@
 """
 Handles caching of static resources.
 """
-import os
-from calendar import timegm
-from email.utils import parsedate
-from wsgiref.handlers import format_date_time
+from base64 import b64encode
+from hashlib import md5
 
 from aspen import Response
 
 
-def version_is_available(request):
-    """Return a boolean, whether we have the version they asked for.
-    """
-    path = request.line.uri.path
-    version = request.website.version
-    return path['version'] == version if 'version' in path else True
+ETAGS = {}
 
 
-def version_is_dash(request):
-    """Return a boolean, whether the version they asked for is -.
-    """
-    return request.line.uri.path.get('version') == '-'
-
-
-def get_last_modified(fs_path):
-    """Get the last modified time, as int, of the file pointed to by fs_path.
-    """
-    return int(os.path.getmtime(fs_path))
+def asset_etag(website, path):
+    if path.endswith('.spt'):
+        return ''
+    if website.cache_static and path in ETAGS:
+        h = ETAGS[path]
+    else:
+        with open(path) as f:
+            h = ETAGS[path] = b64encode(md5(f.read()).digest(), '-_').replace('=', '~')
+    return h
 
 
 def inbound(request):
-    """Try to serve a 304 for resources under assets/.
+    """Try to serve a 304 for static resources.
     """
-    uri = request.line.uri
-
-    if not uri.startswith('/assets/'):
-
-        # Only apply to the assets/ directory.
-
-        return request
-
-    if version_is_dash(request):
-
-        # Special-case a version of '-' to never 304/404 here.
-
-        return request
-
-    if not version_is_available(request):
-
-        # Don't serve one version of a file as if it were another.
-
-        raise Response(404)
-
-    ims = request.headers.get('If-Modified-Since')
-    if not ims:
-
-        # This client doesn't care about when the file was modified.
-
-        return request
-
     if request.fs.endswith('.spt'):
-
-        # This is a requests for a dynamic resource. Perhaps in the future
-        # we'll delegate to such resources to compute a sensible Last-Modified
-        # or E-Tag, but for now we punt. This is okay, because we expect to
-        # put our dynamic assets behind a CDN in production.
-
+        # This is a request for a dynamic resource.
         return request
 
+    etag = request.etag = asset_etag(request.website, request.fs)
 
-    try:
-        ims = timegm(parsedate(ims))
-    except:
-
-        # Malformed If-Modified-Since header. Proceed with the request.
-
+    headers_etag = request.headers.get('If-None-Match')
+    if not headers_etag:
+        # This client doesn't want a 304.
         return request
 
-    last_modified = get_last_modified(request.fs)
-    if ims < last_modified:
+    qs_etag = request.line.uri.querystring.get('etag')
+    if qs_etag and qs_etag != etag:
+        # Don't serve one version of a file as if it were another.
+        raise Response(410)
 
-        # The file has been modified since. Serve the whole thing.
-
+    if headers_etag != etag:
+        # Cache miss, the client sent an old or invalid etag.
         return request
-
 
     # Huzzah!
     # =======
     # We can serve a 304! :D
 
-    response = Response(304)
-    response.headers['Last-Modified'] = format_date_time(last_modified)
-    response.headers['Cache-Control'] = 'no-cache'
-    raise response
+    raise Response(304)
 
 
-def outbound(request, response, website):
-    """Set caching headers for resources under assets/.
+def outbound(request, response):
+    """Set caching headers for static resources.
     """
-    uri = request.line.uri
-
-    if not uri.startswith('/assets/'):
+    if request.fs.endswith('.spt'):
         return response
 
     if response.code != 200:
         return response
 
-    if website.cache_static:
+    # https://developers.google.com/speed/docs/best-practices/caching
+    response.headers['Access-Control-Allow-Origin'] = 'https://gratipay.com'
+    response.headers['Vary'] = 'accept-encoding'
+    response.headers['Etag'] = request.etag
 
-        # https://developers.google.com/speed/docs/best-practices/caching
-        response.headers['Cache-Control'] = 'public'
-        response.headers['Vary'] = 'accept-encoding'
-
-        response.headers['Access-Control-Allow-Origin'] = 'https://gratipay.com'
-
-        # all assets are versioned, so it's fine to cache them
-
-        response.headers['Expires'] = 'Sun, 17 Jan 2038 19:14:07 GMT'
-        last_modified = get_last_modified(request.fs)
-        response.headers['Last-Modified'] = format_date_time(last_modified)
-
-
+    if request.line.uri.querystring.get('etag'):
+        # We can cache "indefinitely" when the querystring contains the etag.
+        response.headers['Cache-Control'] = 'public, max-age=31536000'
+    else:
+        # Otherwise we cache for 5 seconds
+        response.headers['Cache-Control'] = 'public, max-age=5'
